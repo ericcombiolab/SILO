@@ -36,7 +36,7 @@ required arguments
   --output: the path and filename (prefix) of output.  
 ```
 
-## Getting started
+## Quick start
 - Download the IBD_functions.py and run_SILO.py and put them in one folder. run_SILO.py will load the functions defined in IBD_functions.py.  
 - SILO requires Python packages **scipy**, **numpy**, and **pandas**.
 - Download the zipped file sample_data.zip and put it in the same folder with run_SILO.py. Unzip it and run the following command:
