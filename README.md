@@ -1,5 +1,7 @@
 # SILO
 **SILO** is a Python based commond line tool that identifies IBD segments. It could not only detect long IBD segments but also short IBD segments (length < 2 centimorgan) by incorporating low-frequency variants.
+
+Citation: Chonghao Wang, Werner Pieter Veldsman, Lu Zhang. Detection of short identity by descent segments using low-frequency variants. *bioRxiv*, https://doi.org/10.1101/2023.09.26.559464.
 ## Usage
 ```
 python3 run_SILO.py --winsize INT --length FLOAT --error_common FLOAT --error_lowf FLOAT --threshold FLOAT --mode STR --union INT  
