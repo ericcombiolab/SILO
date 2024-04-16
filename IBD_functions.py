@@ -2,14 +2,11 @@ import numpy as np
 import pandas as pd
 import ast
 import multiprocessing
-from itertools import product
 from itertools import chain
 import scipy.integrate as integrate
-import scipy
-import math
 import sys
 import warnings
-from scipy.stats import norm 
+from collections import Counter
 
 warnings.filterwarnings("error")
 
@@ -19,11 +16,7 @@ warnings.filterwarnings("error")
 def generate_windows(win_size,num_markers):
     # win_size: the size of a window
     # num_markers: the total number of commonm SNPs in the file
-    num_windows = float(num_markers/win_size)
-    if num_windows-int(num_windows) >= 0.5:
-        num_windows = int(num_windows)+1
-    else:
-        num_windows = int(num_windows)
+    num_windows = round(num_markers/win_size)
     windows_set = []
     for i in range(num_windows):
         if i != num_windows-1:
@@ -39,7 +32,6 @@ def generate_blocks(windows_set,length,common_tped,density):
     # length: the length of blocks (in centiMorgan)
     # common_tped: the dataframe of .tped file of common SNPs
     # density: SNP density threshold of a block, i.e. the minimum number of common SNPs in a block of length 1 cM
-    judge_process = 0 # This means our building blocks process should continue. If judge_process == 1, then we need to stop
     # find the index of first marker in the theoretical last block
     index = list(common_tped.index[common_tped.iloc[:,2]<=common_tped.iloc[-1,2]-length])[-1]
     window_index = int(index/len(windows_set[0])) # the corresponding index of the window that the marker belongs to
@@ -62,24 +54,24 @@ def generate_blocks(windows_set,length,common_tped,density):
     whole_blocks_set = list(map(list,sorted(set(map(tuple,whole_blocks_set)))))
     return whole_blocks_set
 
-def tmp_compute_freq(i,sub_df_hap):
+
+def tmp_compute_freq(sub_df_hap):
     # This function is for multiprocessing in compute_freq function
-    sub_freq_dic = {}
-    for j in range(len(sub_df_hap.columns)):
-        hap = list(sub_df_hap.iloc[:,j].values)
-        if str(hap) not in list(sub_freq_dic.keys()):
-            sub_freq_dic[str(hap)] = 1/len(sub_df_hap.columns)
-        else:
-            sub_freq_dic[str(hap)] += 1/len(sub_df_hap.columns)
-    # remove haplotypes that have very low frequencies (here we remove frq < 4/len(sub_df_hap.columns))
-    tmp_sub_freq_dic = {key:val for key, val in sub_freq_dic.items() if val >= 4/len(sub_df_hap.columns)}
-    if len(tmp_sub_freq_dic.keys())==0: # In case we do not have haplotypes with frequency larger than 4/len(sub_df_hap.columns) 
-        sub_freq_dic = {key:val for key, val in sub_freq_dic.items() if val >= 2/len(sub_df_hap.columns)}
-    else:
-        sub_freq_dic = {key:val for key, val in sub_freq_dic.items() if val >= 4/len(sub_df_hap.columns)}
+
+    sub_freq_dic = Counter(map(str, list(map(list,sub_df_hap.values.T))))
+    columns_length = len(sub_df_hap.columns)
+    for key in sub_freq_dic:
+        sub_freq_dic[key] /= columns_length
+    # remove haplotypes that have very low frequencies
+    threshold = 4 / columns_length
+    sub_freq_dic = {key: val for key, val in sub_freq_dic.items() if val >= threshold}
+    if not sub_freq_dic:
+        threshold = 2 / columns_length
+        sub_freq_dic = {key: val for key, val in sub_freq_dic.items() if val >= threshold}
+
     return sub_freq_dic
 
-def compute_freq(df_hap,windows_set,num_nodes,common_tped):
+def compute_freq(df_hap, windows_set, num_nodes, common_tped):
     # df_hap: the dataframe of haplotypes
     # windows_set: the set of indexs of SNPs for each window
     # num_nodes: the number of nodes for multiprocessing
@@ -92,12 +84,9 @@ def compute_freq(df_hap,windows_set,num_nodes,common_tped):
     start_pos_set = []
     end_pos_set = []
     for i in range(len(windows_set)):
-        start_pos = common_tped.iloc[windows_set[i][0],3]
-        end_pos = common_tped.iloc[windows_set[i][-1],3]
-        start_pos_set.append(start_pos)
-        end_pos_set.append(end_pos)
-        #freq_dic[i] = tmp_compute_freq(i,df_hap,windows_set)
-        freq_dic[i] = pool.apply_async(tmp_compute_freq,(i,df_hap.iloc[windows_set[i],:],))
+        start_pos_set.append(common_tped.iloc[windows_set[i][0],3])
+        end_pos_set.append(common_tped.iloc[windows_set[i][-1],3])
+        freq_dic[i] = pool.apply_async(tmp_compute_freq, (df_hap.iloc[windows_set[i],:],))
     pool.close()
     pool.join()
     for i in range(len(windows_set)):
@@ -105,49 +94,35 @@ def compute_freq(df_hap,windows_set,num_nodes,common_tped):
     df_pos = pd.DataFrame(start_pos_set)
     df_pos[1] = end_pos_set
 
-    # change two places, which does not affect the final result and could be helpful in assigning rare SNPs to windows (e.g. the first rare SNP's location is before the first window)
     df_pos.iloc[0,0] = 0
-    df_pos.iloc[len(df_pos.index)-1,1] = 2*df_pos.iloc[len(df_pos.index)-1,1] # times 2 is just to make this large enough to include the rare SNPs that are beyond domain of the last window
-    return freq_dic,df_pos
+    df_pos.iloc[-1,1] *= 2
+    return freq_dic, df_pos
 
 def tmp_encoding(j,tped,frq,judge):
     # This is a function for multiprocessing in encoding function
 
-    index_minor = [] # the index of minor alleles (if any) for rare SNPs
+    index_minor = [] # the index of minor alleles (if any) for rare variants
     if judge == 0: # This is for common SNPs
-        index1 = tped.index[tped.iloc[:,4+2*j]==frq.loc[:,'A1'].values]
-        index2 = tped.index[tped.iloc[:,4+2*j]==frq.loc[:,'A2'].values]
-        index3 = sorted(list(set(list(range(len(tped.index))))-set(list(index1)+list(index2)))) # the indices of missing values
-        tped.iloc[index1,4+2*j] = 0
-        tped.iloc[index2,4+2*j] = 1
-        tped.iloc[index3,4+2*j] = -4.5
-
-        index1 = tped.index[tped.iloc[:,4+2*j+1]==frq.loc[:,'A1'].values]
-        index2 = tped.index[tped.iloc[:,4+2*j+1]==frq.loc[:,'A2'].values]
-        index3 = sorted(list(set(list(range(len(tped.index))))-set(list(index1)+list(index2)))) # the indices of missing values
-        tped.iloc[index1,4+2*j+1] = 0
-        tped.iloc[index2,4+2*j+1] = 1
-        tped.iloc[index3,4+2*j+1] = -4.5
+        for i in range(2):
+            condition1 = tped.iloc[:,4+2*j+i]==frq.loc[:,'A1'].values
+            condition2 = tped.iloc[:,4+2*j+i]==frq.loc[:,'A2'].values
+            tped.loc[condition1, tped.columns[4+2*j+i]] = 0
+            tped.loc[condition2, tped.columns[4+2*j+i]] = 1
+            tped.loc[~condition1 & ~condition2, tped.columns[4+2*j+i]] = -4.5
 
         geno = tped.iloc[:,4+2*j].values+tped.iloc[:,4+2*j+1].values
 
-    elif judge == 1: # This is for rare SNPs
-        index1 = tped.index[tped.iloc[:,4+2*j]==frq.loc[:,'A1'].values]
-        index2 = tped.index[tped.iloc[:,4+2*j]==frq.loc[:,'A2'].values]
-        index3 = sorted(list(set(list(range(len(tped.index))))-set(list(index1)+list(index2)))) # the indices of missing values
-        tped.iloc[index1,4+2*j] = 0
-        tped.iloc[index2,4+2*j] = 1
-        tped.iloc[index3,4+2*j] = -4.5
-
-        index4 = tped.index[tped.iloc[:,4+2*j+1]==frq.loc[:,'A1'].values]
-        index5 = tped.index[tped.iloc[:,4+2*j+1]==frq.loc[:,'A2'].values]
-        index6 = sorted(list(set(list(range(len(tped.index))))-set(list(index4)+list(index5)))) # the indices of missing values
-        tped.iloc[index4,4+2*j+1] = 0
-        tped.iloc[index5,4+2*j+1] = 1
-        tped.iloc[index6,4+2*j+1] = -4.5
+    elif judge == 1: # This is for rare variants
+        for i in range(2):
+            condition1 = tped.iloc[:,4+2*j+i]==frq.loc[:,'A1'].values
+            condition2 = tped.iloc[:,4+2*j+i]==frq.loc[:,'A2'].values
+            tped.loc[condition1, tped.columns[4+2*j+i]] = 0
+            tped.loc[condition2, tped.columns[4+2*j+i]] = 1
+            tped.loc[~condition1 & ~condition2, tped.columns[4+2*j+i]] = -4.5
 
         geno = tped.iloc[:,4+2*j].values+tped.iloc[:,4+2*j+1].values
-        index_minor = sorted(list(set(list(index1)+list(index4))))
+        index_minor = (tped.iloc[:,4+2*j]==0) | (tped.iloc[:,4+2*j+1]==0)
+        index_minor = list(index_minor[index_minor].index)
 
     result = [geno,index_minor]
     return result
@@ -156,7 +131,7 @@ def encoding(tped,tfam,frq,judge,num_nodes):
     # tped: dataframe of .tped file of the test set
     # tfam: dataframe of .tfam file of the test set
     # frq: dataframe of .frq file of the training set
-    # judge: binary value (0 or 1). If it's 0, we are dealing with common SNPs. If it's 1, we are dealing with rare SNPs
+    # judge: binary value (0 or 1). If it's 0, we are dealing with common SNPs. If it's 1, we are dealing with rare variants
     # num_nodes: the number of nodes for multiprocessing
 
     tmp_dic = {}
@@ -170,7 +145,7 @@ def encoding(tped,tfam,frq,judge,num_nodes):
     pool.close()
     pool.join()
     list1 = []
-    index_minor_dic = {} # a dictionary links the person and its minor allele distribution in rare SNPs
+    index_minor_dic = {} # a dictionary links the person and its minor allele distribution in rare variants
     for i in range(num_samples):
         list1.append(tmp_dic[i].get()[0])
         index_minor_dic[i] = tmp_dic[i].get()[1]
@@ -181,34 +156,34 @@ def encoding(tped,tfam,frq,judge,num_nodes):
     return result
 
 def allocate_rare2win(indi_1,indi_2,index_minor_dic,rare_tped,df_pos,union):
-    # This function allocates rare SNPs in which at least one individual has minor alleles to windows of common SNPs
+    # This function allocates rare variants in which at least one individual has minor alleles to windows of common SNPs
     # Input:
     # indi_1: the index of individual 1
     # indi_2: the index of individual 2
-    # index_minor_dic: the dictionary which links the individual and the index of rare SNPs in which the individual has minor alleles
-    # rare_tped: the dataframe of .tped file for rare SNPs
+    # index_minor_dic: the dictionary which links the individual and the index of rare variants in which the individual has minor alleles
+    # rare_tped: the dataframe of .tped file for rare variants
     # df_pos: the dataframe of start and end position (base-pair coordinates) for each window
     # union: a hyperparameter
     # Output:
-    # win_rare_dic: the dictionary that links the window and its associated rare SNPs (if any)
+    # win_rare_dic: the dictionary that links the window and its associated rare variants (if any)
 
-    snp_index_1 = index_minor_dic[indi_1] # the list of indexes of the rare SNPs
-    snp_index_2 = index_minor_dic[indi_2] # the list of indexes of the rare SNPs
+    snp_index_1 = index_minor_dic[indi_1] # the list of indexes of the rare variants
+    snp_index_2 = index_minor_dic[indi_2] # the list of indexes of the rare variants
     if union == 1:
         rare_set = sorted(list(set(snp_index_1).union(set(snp_index_2)))) # the union of snp_index_1 and snp_index_2
     elif union == 2:
         rare_set = sorted(list(set(snp_index_1).intersection(set(snp_index_2))))
-    tmp_rare_snp_set = [] # the list consists of indices of low frequency variants that indi_1 or indi_2 have minor allele(s)
-    tmp_window_set = [] # the list consists of indices of windows that have low frequency variants
+    tmp_rare_snp_set = [] # the list consists of indices of rare variants that indi_1 or indi_2 have minor allele(s)
+    tmp_window_set = [] # the list consists of indices of windows that have rare variants
     win_rare_dic = {}
     if len(rare_set) > 0:
         for index in rare_set:
             pos = rare_tped.iloc[index,3] # the base-pair coordinate of the SNP 
             index1 = list(df_pos.index[df_pos.iloc[:,0]<pos])
             index2 = list(df_pos.index[df_pos.iloc[:,1]>pos])
-            intersection = list(set(index1).intersection(set(index2))) # the index of the window that is supposed to include the rare SNP
-            if len(intersection) == 0: # In this case, the rare SNP is outside the window
-                index1 = list(df_pos.index[df_pos.iloc[:,0]>pos])[0]-1 # the index of window that is just before the rare SNP
+            intersection = list(set(index1).intersection(set(index2))) # the index of the window that is supposed to include the rare variant
+            if len(intersection) == 0: # In this case, the rare variant is outside the window
+                index1 = list(df_pos.index[df_pos.iloc[:,0]>pos])[0]-1 # the index of window that is just before the rare variant
                 index2 = index1+1
                 if np.abs(df_pos.iloc[index1,1]-pos) >= np.abs(df_pos.iloc[index2,0]-pos):
                     intersection = [index2]
@@ -354,7 +329,7 @@ def haplotype_listing(geno_1,geno_2,win_freq):
 
     return hap_1,hap_2
 
-def compute_IBD_score(geno_1,geno_2,h1,h2,h3,win_freq,epsilon,num_hap_training):
+def compute_IBD_score(geno_1, geno_2, h1, h2, h3, win_freq, score1, score2, num_hap_training):
     # This function is to compute the probability of IBD for common SNPs scores
     # geno_1: the genotypes of person 1 in a window
     # geno_2: the genotypes of person 2 in a window
@@ -365,21 +340,20 @@ def compute_IBD_score(geno_1,geno_2,h1,h2,h3,win_freq,epsilon,num_hap_training):
     # epsilon: genotype error
     # num_hap_training: the number of haplotypes in the training dataset
 
-    win_freq_copy = win_freq.copy() # Creating this copy is to aviod changing win_freq itself in this function
+    win_freq_copy = win_freq.copy()
 
     p_1 = 1 # p_1 refers to the probability of genotypes given two haplotypes for person 1
+    p_2 = 1
     for i in range(len(geno_1)):
         if geno_1[i] == h1[i]+h2[i]:
-            p_1 = p_1*(1-epsilon)
+            p_1 = p_1*score1
         else:
-            p_1 = p_1*epsilon/2
+            p_1 = p_1*score2
 
-    p_2 = 1
-    for i in range(len(geno_2)):
         if geno_2[i] == h2[i]+h3[i]:
-            p_2 = p_2*(1-epsilon)
+            p_2 = p_2*score1
         else:
-            p_2 = p_2*epsilon/2    
+            p_2 = p_2*score2
 
     tmp_freq = 1/(100*num_hap_training)
     if str(h1) not in list(win_freq_copy.keys()) or win_freq_copy[str(h1)] == 0: # In case that h1 is not in the haplotypes list of training set
@@ -389,36 +363,25 @@ def compute_IBD_score(geno_1,geno_2,h1,h2,h3,win_freq,epsilon,num_hap_training):
     if str(h3) not in list(win_freq_copy.keys()) or win_freq_copy[str(h3)] == 0:
         win_freq_copy[str(h3)] = tmp_freq
 
-    p_IBD = p_1*p_2*win_freq_copy[str(h1)]*win_freq_copy[str(h2)]*win_freq_copy[str(h3)]
+    p_IBD = p_1 * p_2 * win_freq_copy[str(h1)] * win_freq_copy[str(h2)] * win_freq_copy[str(h3)]
     return p_IBD
 
-def compute_nonIBD_score(geno_1,geno_2,h1,h2,h3,h4,win_freq,epsilon,num_hap_training):
-    # This function is to compute the probability of non-IBD for common SNPs scores
-    # geno_1: the genotypes of person 1 in a window
-    # geno_2: the genotypes of person 2 in a window
-    # h1: the haplotype of person 1
-    # h2: the haplotype of person 1
-    # h3: the haplotype of person 2
-    # h4: the haplotype of person 2
-    # win_freq: the dictionary of frequencies of a window in the training set
-    # epsilon: genotype error
-
+def compute_nonIBD_score(geno_1, geno_2, h1, h2, h3, h4, win_freq, score1, score2, num_hap_training):
     win_freq_copy = win_freq.copy()
 
     p_1 = 1 # p_1 refers to the probability of genotypes given two haplotypes for person 1
+    p_2 = 1
     for i in range(len(geno_1)):
         if geno_1[i] == h1[i]+h2[i]:
-            p_1 = p_1*(1-epsilon)
+            p_1 = p_1*score1
         else:
-            p_1 = p_1*epsilon/2
+            p_1 = p_1*score2
 
-    p_2 = 1
-    for i in range(len(geno_2)):
         if geno_2[i] == h3[i]+h4[i]:
-            p_2 = p_2*(1-epsilon)
+            p_2 = p_2*score1
         else:
-            p_2 = p_2*epsilon/2
-    
+            p_2 = p_2*score2
+
     # assign a small value to those not in win_freq_copy or those with frequency being 0
     tmp_freq = 1/(100*num_hap_training)
     if str(h1) not in list(win_freq_copy.keys()) or win_freq_copy[str(h1)] == 0:
@@ -430,20 +393,20 @@ def compute_nonIBD_score(geno_1,geno_2,h1,h2,h3,h4,win_freq,epsilon,num_hap_trai
     if str(h4) not in list(win_freq_copy.keys()) or win_freq_copy[str(h4)] == 0:
         win_freq_copy[str(h4)] = tmp_freq
 
-    p_nonIBD = p_1*p_2*win_freq_copy[str(h1)]*win_freq_copy[str(h2)]*win_freq_copy[str(h3)]*win_freq_copy[str(h4)]
+    p_nonIBD = p_1 * p_2 * win_freq_copy[str(h1)] * win_freq_copy[str(h2)] * win_freq_copy[str(h3)] * win_freq_copy[str(h4)]
     if p_nonIBD == 0:
-        print('p_1: ',p_1)
-        print('p_2: ',p_2)
-        print('freq_h1: ',win_freq_copy[str(h1)])
-        print('freq_h2: ',win_freq_copy[str(h2)])
-        print('freq_h3: ',win_freq_copy[str(h3)])
-        print('freq_h4: ',win_freq_copy[str(h4)])
-        print('tmp_freq: ',tmp_freq)
-        print('win_freq_copy: ',win_freq_copy)
-        sys.exit('p_nonIBD = 0')
+        print('p_1: ', p_1)
+        print('p_2: ', p_2)
+        print('freq_h1: ', win_freq_copy[str(h1)])
+        print('freq_h2: ', win_freq_copy[str(h2)])
+        print('freq_h3: ', win_freq_copy[str(h3)])
+        print('freq_h4: ', win_freq_copy[str(h4)])
+        print('tmp_freq: ', tmp_freq)
+        print('win_freq_copy: ', win_freq_copy)
+        raise Exception('Error: p_nonIBD = 0')
     return p_nonIBD
 
-def compute_common_inner_score(geno_1,geno_2,win_freq,epsilon,num_hap_training):
+def compute_common_inner_score(geno_1, geno_2, win_freq, epsilon, num_hap_training):
     # This function is to compute the common SNPs scores for a pair of people
     # geno_1: the genotypes of person 1 in a window
     # geno_2: the genotypes of person 2 in a window
@@ -451,59 +414,54 @@ def compute_common_inner_score(geno_1,geno_2,win_freq,epsilon,num_hap_training):
     # hap_2: the potential haplotypes given geno_2 and the shown haplotypes in the training set
     # epsilon: genotype error
     
-    hap_1,hap_2 = haplotype_listing(geno_1,geno_2,win_freq)
-    p_IBD = 0 # the sum of probabilities of all potential haplotypes
-    p_nonIBD = 0
-    if int(len(hap_1)/2) != len(hap_1)/2 or int(len(hap_2)/2) != len(hap_2)/2:
-        sys.exit('hap_1.shape[0] or hap_2.shape[0] is not even')
+    hap_1, hap_2 = haplotype_listing(geno_1, geno_2, win_freq)
+    p_IBD, p_nonIBD = 0, 0
+    score1 = 1-epsilon
+    score2 = epsilon/2
+
+    if len(hap_1) % 2 != 0 or len(hap_2) % 2 != 0:
+        raise Exception('Error: hap_1.shape[0] or hap_2.shape[0] is not even')
+
     for i in range(int(len(hap_1)/2)):
         for j in range(int(len(hap_2)/2)):
-            # IBD assumption part
-            ## For example, assume the first haplotype in i-th haplotype pair and the first haplotype in j-th pair to be h2
             tmp_set = []
             for k1 in range(2):
                 for k2 in range(2):
                     for k3 in range(2):
-                        if k1 == 0: # when k1 == 0, we take the haplotype from hap_1 as h2. The reason that we seperately take hap_1 and hap_2 as h2 is we could thus minimise the effects of genotype errors. Suppose if geno_1 has genotype error (true genotype 2 to false genotype 0 or true genotype 0 to false genotye 2), then hap_1 could not contain the correct haplotype. If we try hap_2 as well rather than hap_1 as h2, then we could be able to minimize the effects caused by genotype error (as the chance that two genotypes geno_1 and geno_2 both have error is relatively smaller)
-                            h1 = list(hap_1[2*i+k2])
-                            h2 = list(hap_1[2*i+(1-k2)])
-                            h3 = list(hap_2[2*j+k3])
-                        elif k1 == 1: # when k1 == 1, we take the haplotype from hap_2 as h2.
-                            h1 = list(hap_1[2*i+k2])
-                            h2 = list(hap_2[2*j+(1-k3)])
-                            h3 = list(hap_2[2*j+k3])
-                        p_IBD_inter = compute_IBD_score(geno_1,geno_2,h1,h2,h3,win_freq,epsilon,num_hap_training)
+                        h1, h3 = hap_1[2*i+k2], hap_2[2*j+k3]
+                        if k1 == 0:
+                            h2 = hap_1[2*i+(1-k2)]
+                        elif k1 == 1:
+                            h2 = hap_2[2*j+(1-k3)]
+                        p_IBD_inter = compute_IBD_score(geno_1, geno_2, h1, h2, h3, win_freq, score1, score2, num_hap_training)
                         tmp_set.append(p_IBD_inter)
-            p_IBD += max(tmp_set) # we pick the largest value in tmp_set as p_IBD_inter. Because we do not know which haplotype should be the actual h2, we take all possible choices and choose the one with the largest value 
-            # non-IBD assumption part
-            h1 = list(hap_1[2*i])
-            h2 = list(hap_1[2*i+1])
-            h3 = list(hap_2[2*j])
-            h4 = list(hap_2[2*j+1])
-            p_nonIBD_inter = compute_nonIBD_score(geno_1,geno_2,h1,h2,h3,h4,win_freq,epsilon,num_hap_training)
+            p_IBD += max(tmp_set)
+
+            h1, h2, h3, h4 = hap_1[2*i], hap_1[2*i+1], hap_2[2*j], hap_2[2*j+1]
+            p_nonIBD_inter = compute_nonIBD_score(geno_1, geno_2, h1, h2, h3, h4, win_freq, score1, score2, num_hap_training)
             if p_nonIBD_inter == 0:
-                sys.exit('p_nonIBD_inter == 0')
+                raise Exception('p_nonIBD_inter == 0')
             p_nonIBD += p_nonIBD_inter
+
     if p_IBD != 0 and p_nonIBD != 0:
         common_score = np.log(p_IBD/p_nonIBD)
     elif p_IBD == 0 and p_nonIBD != 0:
         common_score = -100 # -100 is used to represent -inf. Any reasonablely negative values could be picked as long as it is far from 0
     else:
         common_score = 0
-    result = [p_IBD,p_nonIBD,common_score]
-    return result
+    return [p_IBD, p_nonIBD, common_score]
 
 ###############################################################################
-# This part is for rare SNPs
+# This part is for rare variants
 
 def compute_allele_num(train_counts,test_tped,rare_snp_set):
     # Input:
-    # train_counts: the dataframe of .frq.counts file of rare SNPs in training dataset
-    # test_tped: the dataframe of .tped file of test dataset of rare SNPs
-    # rare_snp_set: the list consists of indexes of rare SNPs in which both individuals have minor allele
+    # train_counts: the dataframe of .frq.counts file of rare variants in training dataset
+    # test_tped: the dataframe of .tped file of test dataset of rare variants
+    # rare_snp_set: the list consists of indexes of rare variants in which both individuals have minor allele
     # Output:
-    # minor_set_train: the list of the count of minor alleles (rare SNPs) in the training set
-
+    # minor_set_train: the list of the count of minor alleles (rare variants) in the training set
+    
     minor_set_train = []
     major_set_train = []
     minor_set_test = []
@@ -525,50 +483,52 @@ def compute_allele_num(train_counts,test_tped,rare_snp_set):
                 count_major_test += 1
         minor_set_test.append(count_minor_test)
         major_set_test.append(count_major_test)
-    return minor_set_train,major_set_train,minor_set_test,major_set_test
 
-def distribution(theta,alpha,beta,constant_value,epsilon):
+    return minor_set_train, major_set_train, minor_set_test, major_set_test
+
+def distribution(theta,alpha,beta,constant_value):
     # this function is for beta distribution or normal distribution (approximation to beta distribution)
     if constant_value == np.inf: # the overflow occurs
-        normal_mean = alpha/(alpha+beta)
-        normal_std = (alpha*beta/((alpha+beta)**2*(alpha+beta+1)))**0.5
+        sum1 = alpha+beta
+        normal_mean = alpha/sum1
+        normal_std = (alpha*beta/(sum1**2*(sum1+1)))**0.5
         res = 1/(normal_std*(2*np.pi)**0.5)*np.exp(-0.5*((theta-normal_mean)/normal_std)**2)
     else:
         res = theta**(alpha-1)*(1-theta)**(beta-1)*constant_value
     return res
 
-def p_3(h_1,h_2,h_3,alpha,beta,constant_value,epsilon):
+def p_3(h_1,h_2,h_3,alpha,beta,constant_value):
     # this is for the case of IBD
-    res = integrate.quad(lambda theta: theta**h_1*(1-theta)**(1-h_1)*theta**h_2*(1-theta)**(1-h_2)*theta**h_3*(1-theta)**(1-h_3)*distribution(theta,alpha,beta,constant_value,epsilon),0,1,epsabs=1e-15)
+    res = integrate.quad(lambda theta: theta**(h_1+h_2+h_3)*(1-theta)**(3-h_1-h_2-h_3)*distribution(theta,alpha,beta,constant_value),0,1,epsabs=1e-15)
     return res[0]
+    
 
-def p_4(h_1,h_2,h_3,h_4,alpha,beta,constant_value,epsilon):
+def p_4(h_1,h_2,h_3,h_4,alpha,beta,constant_value):
     # this is for the case of non-IBD
     # Here h_1, h_2, h_3 and h_4 are different from those in p_3 function
-    res = integrate.quad(lambda theta: theta**h_1*(1-theta)**(1-h_1)*theta**h_2*(1-theta)**(1-h_2)*theta**h_3*(1-theta)**(1-h_3)*theta**h_4*(1-theta)**(1-h_4)*distribution(theta,alpha,beta,constant_value,epsilon),0,1,epsabs=1e-15) # Note that if we encounter integration warnings (e.g. report divergence), we could change the parameter 'epsabs' to solve the problem 
+    res = integrate.quad(lambda theta: theta**(h_1+h_2+h_3+h_4)*(1-theta)**(4-h_1-h_2-h_3-h_4)*distribution(theta,alpha,beta,constant_value),0,1,epsabs=1e-15) # Note that if we encounter integration warnings (e.g. report divergence), we could change the parameter 'epsabs' to solve the problem 
     return res[0]
 
-def p_g_h_IBD(h_1,h_2,h_3,g_1,g_2,epsilon):
+def p_g_h_IBD(h_1,h_2,h_3,g_1,g_2,score1,score2):
     # This function is to compute p(g_1|h1,h2)*p(g_2|h2,h3)
     # h_1: the genotype of person 1
     # h_2: the genotype of person 1 and person 2
     # h_3: the genotype of person 2
     # g_1: the genotype of person 1
     # g_2: the genotype of person 2
-    # epsilon: the genotyping error
-    p = 1
+
     if g_1 == h_1+h_2:
-        p = p*(1-epsilon)
+        p = score1
     else:
-        p = p*epsilon/2
+        p = score2
 
     if g_2 == h_2+h_3:
-        p = p*(1-epsilon)
+        p = p*score1
     else:
-        p = p*epsilon/2
+        p = p*score2
     return p
 
-def p_g_h_nonIBD(h_1,h_2,h_3,h_4,g_1,g_2,epsilon):
+def p_g_h_nonIBD(h_1,h_2,h_3,h_4,g_1,g_2,score1,score2):
     # This function is to compute p(g_1|h1,h2)*p(g_2|h3,h4)
     # h_1: the genotype of person 1
     # h_2: the genotype of person 1
@@ -576,17 +536,16 @@ def p_g_h_nonIBD(h_1,h_2,h_3,h_4,g_1,g_2,epsilon):
     # h_4: the genotype of person 2
     # g_1: the genotype of person 1
     # g_2: the genotype of person 2
-    # epsilon: the genotyping error
-    p = 1
+
     if g_1 == h_1+h_2:
-        p = p*(1-epsilon)
+        p = score1
     else:
-        p = p*epsilon/2
+        p = score2
 
     if g_2 == h_3+h_4:
-        p = p*(1-epsilon)
+        p = p*score1
     else:
-        p = p*epsilon/2
+        p = p*score2
     return p
 
 def single_marker(rare_geno_1,rare_geno_2,minor_count_train,major_count_train,minor_count_test,major_count_test,epsilon):
@@ -606,24 +565,26 @@ def single_marker(rare_geno_1,rare_geno_2,minor_count_train,major_count_train,mi
 
     p_IBD = 0
     p_nonIBD = 0
+    score1 = 1-epsilon
+    score2 = epsilon/2
     for h_1 in [0,1]:
         for h_2 in [0,1]:
             for h_3 in [0,1]:
-                p_IBD += p_g_h_IBD(h_1,h_2,h_3,g_1,g_2,epsilon)*p_3(h_1,h_2,h_3,alpha,beta,constant_value,epsilon)
+                p_IBD += p_g_h_IBD(h_1,h_2,h_3,g_1,g_2,score1,score2)*p_3(h_1,h_2,h_3,alpha,beta,constant_value)
                 for h_4 in [0,1]:
                     if (h_3 == 1 and h_4 == 0) or (h_1 == 1 and h_2 == 0):
                         judge = 1
                     else:
                         judge = 0
                     if judge == 0: # remove the double counting when genotype is 1
-                        p_nonIBD += p_g_h_nonIBD(h_1,h_2,h_3,h_4,g_1,g_2,epsilon)*p_4(h_1,h_2,h_3,h_4,alpha,beta,constant_value,epsilon)
+                        p_nonIBD += p_g_h_nonIBD(h_1,h_2,h_3,h_4,g_1,g_2,score1,score2)*p_4(h_1,h_2,h_3,h_4,alpha,beta,constant_value)
 
     return p_IBD,p_nonIBD
 
 def compute_rare_score(minor_set_train,major_set_train,minor_set_test,major_set_test,rare_snp_set,rare_geno_1_set,rare_geno_2_set,epsilon):
-    # rare_snp_set: the list consists of indexes of rare SNPs in which both individuals have minor allele
-    # rare_tped is the dataframe of .tped file of rare SNPs of test dataset
-    # frq_count is the dataframe of .frq.counts of rare SNPs of training dataset
+    # rare_snp_set: the list consists of indexes of rare variants in which both individuals have minor allele
+    # rare_tped is the dataframe of .tped file of rare variants of test dataset
+    # frq_count is the dataframe of .frq.counts of rare variants of training dataset
     p_IBD = 1
     p_nonIBD = 1
     for i in range(len(rare_snp_set)):
@@ -778,13 +739,9 @@ def internal_simulation(training_hap,N_simIBD,N_simnonIBD,common_map,block_lengt
     geno_indi_nonIBD.columns = list(range(len(geno_indi_nonIBD.columns)))
     return geno_indi_IBD,geno_indi_nonIBD
 
-def empirical_distribution(win_indi_IBD,win_indi_nonIBD,bin_length,win_freq,epsilon_common,num_hap_training,pseudo_count):
+def empirical_distribution(win_indi_IBD, win_indi_nonIBD, bin_length, win_freq, epsilon_common, num_hap_training, pseudo_count):
     # This function is used to generate empirical distribution
-    # Input:
-    # win_indi_IBD: the dataframe of simulated IBD individuals in a window
-    # win_indi_nonIBD: the dataframe of simulated non-IBD individuals in a window
-    # bin_length: the length of bins
-    # pseudo_count: Used in Laplace smoothing. A technique used to smooth categorical data.
+
     IBD_score_set = []
     nonIBD_score_set = []
 
@@ -885,15 +842,11 @@ def empirical_distribution(win_indi_IBD,win_indi_nonIBD,bin_length,win_freq,epsi
         boundary_score_left_nonIBD_set.append(boundary_score_left)
         boundary_score_right_nonIBD_set.append(boundary_score_right)
         bin_frequency_nonIBD_set.append(bin_frequency)
-    df_empi_IBD = pd.DataFrame(boundary_score_left_IBD_set)
-    df_empi_IBD[1] = boundary_score_right_IBD_set
-    df_empi_IBD[2] = bin_frequency_IBD_set
-
-    df_empi_nonIBD = pd.DataFrame(boundary_score_left_nonIBD_set)
-    df_empi_nonIBD[1] = boundary_score_right_nonIBD_set
-    df_empi_nonIBD[2] = bin_frequency_nonIBD_set
-
-    return [df_empi_IBD,df_empi_nonIBD]
+    
+    arr_empi_IBD = np.array([boundary_score_left_IBD_set,boundary_score_right_IBD_set,bin_frequency_IBD_set]).T
+    arr_empi_nonIBD = np.array([boundary_score_left_nonIBD_set,boundary_score_right_nonIBD_set,bin_frequency_nonIBD_set]).T
+    
+    return [arr_empi_IBD,arr_empi_nonIBD]
 
 def compute_common_outer_score(df_empi_IBD,df_empi_nonIBD,common_geno_1_set,common_geno_2_set,win_freq,epsilon_common,num_hap_training):
     # This function is used to compute the outer log-likelihood ratio
@@ -904,8 +857,6 @@ def compute_common_outer_score(df_empi_IBD,df_empi_nonIBD,common_geno_1_set,comm
     # common_geno_2_set: the list of genotypes of individual 2 in the testing data set for a window
     # 
 
-    df_empi_IBD.index = list(range(len(df_empi_IBD.index)))
-    df_empi_nonIBD.index = list(range(len(df_empi_nonIBD.index)))
     common_result = compute_common_inner_score(common_geno_1_set,common_geno_2_set,win_freq,epsilon_common,num_hap_training)
     common_inner_score = common_result[2]
 
@@ -972,8 +923,10 @@ def compute_score_v1(common_geno_1_set,common_geno_2_set,win_freq,minor_set_trai
     result = [common_score,rare_score,score]
     return result
 
-def compute_score_v2(df_empi_IBD,df_empi_nonIBD,common_geno_1_set,common_geno_2_set,win_freq,minor_set_train,major_set_train,minor_set_test,major_set_test,epsilon_common,epsilon_rare,num_hap_training,rare_SNP_set,rare_geno_1_set,rare_geno_2_set,judge_rare):
+def compute_score_v2(arr_empi_IBD,arr_empi_nonIBD,common_geno_1_set,common_geno_2_set,win_freq,minor_set_train,major_set_train,minor_set_test,major_set_test,epsilon_common,epsilon_rare,num_hap_training,rare_SNP_set,rare_geno_1_set,rare_geno_2_set,judge_rare):
     # This function computes outer log-likelihood ratio of common variants and scores of low-frequency variants, and combine them into a single score
+    df_empi_IBD = pd.DataFrame(arr_empi_IBD)
+    df_empi_nonIBD = pd.DataFrame(arr_empi_nonIBD)
     epsilon_common = 0.01*epsilon_common # during inference, we multiply a scaling factor (0.01 here) to epsilon_common to reduce FPR
     common_result = compute_common_outer_score(df_empi_IBD,df_empi_nonIBD,common_geno_1_set,common_geno_2_set,win_freq,epsilon_common,num_hap_training)
     if judge_rare == 1:
@@ -987,8 +940,42 @@ def compute_score_v2(df_empi_IBD,df_empi_nonIBD,common_geno_1_set,common_geno_2_
     result = [common_score,rare_score,score]
     return result
 
+def compute_score_multiprocess(chunk_windows_set,start_index,indi_1_index,indi_2_index,df_geno_common_sub,df_geno_rare_sub,
+                               freq_dic,win_rare_dic,rare_frq_counts,rare_tped,mode,arr_empi_IBD_sub,arr_empi_nonIBD_sub,num_bin,
+                               epsilon_common,epsilon_rare,num_hap_training):
+    # This function is used for multiprocessing
+    tmp_res_set = []
+    for j in range(len(chunk_windows_set)):
+        recoordinated_index = start_index+j
+        common_geno_1_set = list(df_geno_common_sub.loc[chunk_windows_set[j],indi_1_index].values)
+        common_geno_2_set = list(df_geno_common_sub.loc[chunk_windows_set[j],indi_2_index].values)
+        win_freq = freq_dic[recoordinated_index]
+        judge_rare = 0
+        if recoordinated_index in win_rare_dic:
+            judge_rare = 1
+            rare_SNP_set = win_rare_dic[recoordinated_index]
+            rare_geno_1_set = list(df_geno_rare_sub.loc[rare_SNP_set,indi_1_index].values)
+            rare_geno_2_set = list(df_geno_rare_sub.loc[rare_SNP_set,indi_2_index].values)
+            minor_set_train,major_set_train,minor_set_test,major_set_test = compute_allele_num(rare_frq_counts,rare_tped,rare_SNP_set)
+        else:
+            rare_SNP_set = []
+            rare_geno_1_set = []
+            rare_geno_2_set = []
+            minor_set_train = []
+            major_set_train = []
+            minor_set_test = []
+            major_set_test = []
+        if mode == 'inner':
+            result = compute_score_v1(common_geno_1_set,common_geno_2_set,win_freq,minor_set_train,major_set_train,minor_set_test,major_set_test,epsilon_common,epsilon_rare,num_hap_training,rare_SNP_set,rare_geno_1_set,rare_geno_2_set,judge_rare)
+        else:
+            arr_empi_IBD = arr_empi_IBD_sub[j*num_bin:(j+1)*num_bin]
+            arr_empi_nonIBD = arr_empi_nonIBD_sub[j*num_bin:(j+1)*num_bin]
+            result = compute_score_v2(arr_empi_IBD,arr_empi_nonIBD,common_geno_1_set,common_geno_2_set,win_freq,minor_set_train,major_set_train,minor_set_test,major_set_test,epsilon_common,epsilon_rare,num_hap_training,rare_SNP_set,rare_geno_1_set,rare_geno_2_set,judge_rare)
+        tmp_res_set.append(result)
+    return tmp_res_set
+
 def combine_pos_set(start_pos_set_1,end_pos_set_1,start_pos_set_2,end_pos_set_2):
-    # This function is used in function generate_IBD_region to combine IBD regions from common variants and low frequency variants into a final IBD regions
+    # This function is used in function generate_IBD_region to combine IBD regions from common variants and rare variants into a final IBD regions
     df_pos = pd.DataFrame(start_pos_set_1)
     df_pos[1] = end_pos_set_1
 
@@ -1245,17 +1232,19 @@ def generate_block_scores(indi_1,indi_2,whole_blocks_set,start_index,score_set):
     return list_combined
     
 
-def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,rare_map,threshold,negative_ratio_thres,negative_count_thres,include_clean):
+def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,rare_map,threshold,negative_ratio_thres,negative_count_thres,
+                        include_clean,seed_score_thres,negative_thres):
     # Input:
     # df_block_score: the dataframe of block score file of a pair of individuals
     # df_window_score: the dataframe of window score file of a pair of individuals
     # windows_set: the list of windows in which associated markers are
     # common_map: the .map file of common SNPs
-    # rare_map: the .map file of rare SNPs
+    # rare_map: the .map file of rare variants
     # threshold: the threshold for LLR score
     # negative_ratio_thres: the threshold for the negative_ratio
     # negative_count_thres: the threshold for the negative_count
     # include_clean: whether include the cleaning procedure or not (include_clean == 1 if it is included)
+    # seed_score_thres: the threshold score of the seed (a window that contains a rare variant). 
     # Output:
     #
 
@@ -1313,7 +1302,7 @@ def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,ra
             elif len(index_inter1) == 0 and len(index_inter2) > 0:
                 tmp_pos_set = []
                 for j in range(len(index_inter2)):
-                    if np.abs(rare_map.loc[index_inter2[j],3]-next_common_start_pos) > np.abs(rare_map.loc[index_inter2[j],3]-common_end_pos): # here it's not '>=' but just '>', because for consistency, we put rare_SNPs that are in the case of '=' to windows that they have the rare SNPs before them but not behind them
+                    if np.abs(rare_map.loc[index_inter2[j],3]-next_common_start_pos) > np.abs(rare_map.loc[index_inter2[j],3]-common_end_pos): # here it's not '>=' but just '>', because for consistency, we put rare_SNPs that are in the case of '=' to windows that they have the rare variants before them but not behind them
                         tmp_pos_set.append(rare_map.loc[index_inter2[j],3])
                 if len(tmp_pos_set) == 0:
                     end_pos = common_end_pos
@@ -1392,7 +1381,7 @@ def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,ra
                 elif len(index_inter1) == 0 and len(index_inter2) > 0:
                     tmp_pos_set = []
                     for j in range(len(index_inter2)):
-                        if np.abs(rare_map.loc[index_inter2[j],3]-next_common_start_pos) > np.abs(rare_map.loc[index_inter2[j],3]-common_end_pos): # here it's not '>=' but just '>', because for consistency, we put rare_SNPs that are in the case of '=' to windows that they have the rare SNPs before them but not behind them
+                        if np.abs(rare_map.loc[index_inter2[j],3]-next_common_start_pos) > np.abs(rare_map.loc[index_inter2[j],3]-common_end_pos): # here it's not '>=' but just '>', because for consistency, we put rare_SNPs that are in the case of '=' to windows that they have the rare variants before them but not behind them
                             tmp_pos_set.append(rare_map.loc[index_inter2[j],3])
                     if len(tmp_pos_set) == 0:
                         end_pos = common_end_pos
@@ -1420,10 +1409,10 @@ def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,ra
                 end_pos_set.append(end_pos)
 
     # get the IBD regions based on low-frequency variants
-    index_set = df_window_score.index[df_window_score.loc[:,'lowf_score']>1] # get the indices of low frequency variants that two individuals share minor alleles. We use >1 instead of >0 due to that genotypes of 1 and 2 of two individuals could have lowf_score slighly larger than 0 and we do not want to include this case.
-    lowf_start_pos_set = []
-    lowf_end_pos_set = []
-    index_store_set = [] # This list is used to store the indices of windows that have been included in the IBD regions for low frequency variants
+    index_set = df_window_score.index[df_window_score.loc[:,'rare_score']>1] # get the indices of rare variants that two individuals share minor alleles. We use >1 instead of >0 due to that genotypes of 1 and 2 of two individuals could have rare_score slighly larger than 0 and we do not want to include this case.
+    rare_start_pos_set = []
+    rare_end_pos_set = []
+    index_store_set = [] # This list is used to store the indices of windows that have been included in the IBD regions for rare variants
 
     if len(index_set) != 0:
         for i in range(len(index_set)):
@@ -1433,89 +1422,91 @@ def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,ra
                 index_left = index
                 index_right = index
                 index_store_set.append(index)
-                if df_window_score.loc[index,'common_score'] < 0:
+                if df_window_score.loc[index,'common_score'] < negative_thres:
                     negative_count = 1 # count of negative window scores (common score)
                 else:
                     negative_count = 0
                 all_count = 1
-                while llr >= threshold:
-                    region_start_cm_pos = common_map.iloc[windows_set[index_left][0],2]
-                    region_end_cm_pos = common_map.iloc[windows_set[index_right][-1],2]
-                    region_length = region_end_cm_pos-region_start_cm_pos
-                    negative_ratio = negative_count/all_count
-                    if region_length <= 2 and (negative_ratio <= negative_ratio_thres or negative_count <= negative_count_thres): # low frequency variants are used for finding short IBD regions. We do not extend the region if it is longer than 2 cM
-                        if index_left > 0 and index_right < len(df_window_score.index)-1:
-                            index_left = index_left-1
-                            index_right = index_right+1
-                            left_llr = df_window_score.loc[index_left,'LLR']
-                            right_llr = df_window_score.loc[index_right,'LLR']
-                            new_llr = llr+left_llr+right_llr
-                            if new_llr >= threshold and left_llr >= -3 and right_llr >= -3:
-                                llr = new_llr
-                                index_store_set.append(index_left)
-                                index_store_set.append(index_right)
-                                if df_window_score.loc[index_left,'common_score'] < 0:
-                                    negative_count += 1
-                                if df_window_score.loc[index_right,'common_score'] < 0:
-                                    negative_count += 1
-                                all_count += 2
-                            else:
+                
+                if (seed_score_thres != None and df_window_score.loc[index,'common_score'] >= seed_score_thres) or seed_score_thres == None: 
+                    while llr >= threshold:
+                        region_start_cm_pos = common_map.iloc[windows_set[index_left][0],2]
+                        region_end_cm_pos = common_map.iloc[windows_set[index_right][-1],2]
+                        region_length = region_end_cm_pos-region_start_cm_pos
+                        negative_ratio = negative_count/all_count
+                        if region_length <= 2 and (negative_ratio <= negative_ratio_thres or negative_count <= negative_count_thres): # rare variants are used for finding short IBD regions. We do not extend the region if it is longer than 2 cM
+                            if index_left > 0 and index_right < len(df_window_score.index)-1:
+                                index_left = index_left-1
+                                index_right = index_right+1
+                                left_llr = df_window_score.loc[index_left,'LLR']
+                                right_llr = df_window_score.loc[index_right,'LLR']
+                                new_llr = llr+left_llr+right_llr
+                                if new_llr >= threshold and left_llr >= -3 and right_llr >= -3:
+                                    llr = new_llr
+                                    index_store_set.append(index_left)
+                                    index_store_set.append(index_right)
+                                    if df_window_score.loc[index_left,'common_score'] < negative_thres:
+                                        negative_count += 1
+                                    if df_window_score.loc[index_right,'common_score'] < negative_thres:
+                                        negative_count += 1
+                                    all_count += 2
+                                else:
+                                    new_llr = llr+left_llr
+                                    if new_llr >= threshold and left_llr >= -3:
+                                        llr = new_llr
+                                        index_store_set.append(index_left)
+                                        if df_window_score.loc[index_left,'common_score'] < negative_thres:
+                                            negative_count += 1
+                                        all_count += 1
+                                        index_right = index_right-1 # here it is to avoid the expansion of the right direction when adding the llr score of the right window does not exceed the threshold
+                                    else:
+                                        new_llr = llr+right_llr
+                                        if new_llr >= threshold and right_llr >= -3:
+                                            llr = new_llr
+                                            index_store_set.append(index_right)
+                                            if df_window_score.loc[index_right,'common_score'] < negative_thres:
+                                                negative_count += 1
+                                            all_count += 1
+                                            index_left = index_left+1
+                                        else: # the case that expansion makes LLR score smaller than the threshold or both left_llr and right_llr are smaller than -3
+                                            index_left = index_left+1
+                                            index_right = index_right-1
+                                            break
+                            elif index_left <= 0 and index_right < len(df_window_score.index)-1:
+                                index_right = index_right+1
+                                right_llr = df_window_score.loc[index_right,'LLR']
+                                new_llr = llr+right_llr
+                                if new_llr >= threshold and right_llr >= -3:
+                                    llr = new_llr
+                                    if df_window_score.loc[index_right,'common_score'] < negative_thres:
+                                        negative_count += 1
+                                    all_count += 1
+                                    index_store_set.append(index_right)
+                                else:
+                                    index_right = index_right-1
+                                    break
+                            elif index_left > 0 and index_right >= len(df_window_score.index)-1:
+                                index_left = index_left-1
+                                left_llr = df_window_score.loc[index_left,'LLR']
                                 new_llr = llr+left_llr
                                 if new_llr >= threshold and left_llr >= -3:
                                     llr = new_llr
                                     index_store_set.append(index_left)
-                                    if df_window_score.loc[index_left,'common_score'] < 0:
+                                    if df_window_score.loc[index_left,'common_score'] < negative_thres:
                                         negative_count += 1
                                     all_count += 1
-                                    index_right = index_right-1 # here it is to avoid the expansion of the right direction when adding the llr score of the right window does not exceed the threshold
                                 else:
-                                    new_llr = llr+right_llr
-                                    if new_llr >= threshold and right_llr >= -3:
-                                        llr = new_llr
-                                        index_store_set.append(index_right)
-                                        if df_window_score.loc[index_right,'common_score'] < 0:
-                                            negative_count += 1
-                                        all_count += 1
-                                        index_left = index_left+1
-                                    else: # the case that expansion makes LLR score smaller than the threshold or both left_llr and right_llr are smaller than -3
-                                        index_left = index_left+1
-                                        index_right = index_right-1
-                                        break
-                        elif index_left <= 0 and index_right < len(df_window_score.index)-1:
-                            index_right = index_right+1
-                            right_llr = df_window_score.loc[index_right,'LLR']
-                            new_llr = llr+right_llr
-                            if new_llr >= threshold and right_llr >= -3:
-                                llr = new_llr
-                                if df_window_score.loc[index_right,'common_score'] < 0:
-                                    negative_count += 1
-                                all_count += 1
-                                index_store_set.append(index_right)
+                                    index_left = index_left+1
+                                    break
                             else:
-                                index_right = index_right-1
                                 break
-                        elif index_left > 0 and index_right >= len(df_window_score.index)-1:
-                            index_left = index_left-1
-                            left_llr = df_window_score.loc[index_left,'LLR']
-                            new_llr = llr+left_llr
-                            if new_llr >= threshold and left_llr >= -3:
-                                llr = new_llr
-                                index_store_set.append(index_left)
-                                if df_window_score.loc[index_left,'common_score'] < 0:
-                                    negative_count += 1
-                                all_count += 1
-                            else:
+                        else:
+                            if index_left != index and index_right != index:
                                 index_left = index_left+1
-                                break
-                        else:
+                                index_right = index_right-1
+                            else:
+                                llr = threshold-1 # we do not report this region as an IBD region
                             break
-                    else:
-                        if index_left != index and index_right != index:
-                            index_left = index_left+1
-                            index_right = index_right-1
-                        else:
-                            llr = threshold-1 # we do not report this region as an IBD region
-                        break
                 if llr >= threshold:
                     if index_left == 0:
                         previous_common_end_pos = common_map.iloc[windows_set[index_left][0],3]-1
@@ -1550,7 +1541,7 @@ def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,ra
                     elif len(index_inter1) == 0 and len(index_inter2) > 0:
                         tmp_pos_set = []
                         for j in range(len(index_inter2)):
-                            if np.abs(rare_map.loc[index_inter2[j],3]-next_common_start_pos) > np.abs(rare_map.loc[index_inter2[j],3]-common_end_pos): # here it's not '>=' but just '>', because for consistency, we put rare_SNPs that are in the case of '=' to windows that they have the rare SNPs before them but not behind them
+                            if np.abs(rare_map.loc[index_inter2[j],3]-next_common_start_pos) > np.abs(rare_map.loc[index_inter2[j],3]-common_end_pos): # here it's not '>=' but just '>', because for consistency, we put rare_SNPs that are in the case of '=' to windows that they have the rare variants before them but not behind them
                                 tmp_pos_set.append(rare_map.loc[index_inter2[j],3])
                         if len(tmp_pos_set) == 0:
                             end_pos = common_end_pos
@@ -1574,43 +1565,43 @@ def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,ra
                             end_pos = common_end_pos
                         else:
                             end_pos = max(tmp_pos_set_2) # get the maximum in the tmp_pos_set, note that here is not minimum
-                    if len(lowf_start_pos_set) > 0:
-                        if start_pos > max(lowf_end_pos_set):
-                            lowf_start_pos_set.append(start_pos)
-                            lowf_end_pos_set.append(end_pos)
-                        elif start_pos == max(lowf_end_pos_set):
-                            lowf_end_pos_set[-1] = end_pos
+                    if len(rare_start_pos_set) > 0:
+                        if start_pos > max(rare_end_pos_set):
+                            rare_start_pos_set.append(start_pos)
+                            rare_end_pos_set.append(end_pos)
+                        elif start_pos == max(rare_end_pos_set):
+                            rare_end_pos_set[-1] = end_pos
                         else:
-                            if start_pos <= min(lowf_start_pos_set):
-                                lowf_start_pos_set = [start_pos]
-                                if end_pos > max(lowf_end_pos_set):
-                                    lowf_end_pos_set = [end_pos]
+                            if start_pos <= min(rare_start_pos_set):
+                                rare_start_pos_set = [start_pos]
+                                if end_pos > max(rare_end_pos_set):
+                                    rare_end_pos_set = [end_pos]
                                 else:
-                                    lowf_end_pos_set = [max(lowf_end_pos_set)]
+                                    rare_end_pos_set = [max(rare_end_pos_set)]
                             else:
-                                for m1 in range(len(lowf_end_pos_set)-1):
-                                    if start_pos <= lowf_end_pos_set[m1]:
-                                        lowf_start_pos_set = lowf_start_pos_set[:(m1+1)]
-                                        lowf_end_pos_set = lowf_end_pos_set[:(m1+1)]
-                                        lowf_end_pos_set[-1] = end_pos
+                                for m1 in range(len(rare_end_pos_set)-1):
+                                    if start_pos <= rare_end_pos_set[m1]:
+                                        rare_start_pos_set = rare_start_pos_set[:(m1+1)]
+                                        rare_end_pos_set = rare_end_pos_set[:(m1+1)]
+                                        rare_end_pos_set[-1] = end_pos
                                         break
                                     else:
-                                        if start_pos < lowf_start_pos_set[m1+1]:
-                                            lowf_start_pos_set = lowf_start_pos_set[:(m1+1)]
-                                            lowf_end_pos_set = lowf_end_pos_set[:(m1+1)]
-                                            lowf_start_pos_set.append(start_pos)
-                                            lowf_end_pos_set.append(end_pos)
+                                        if start_pos < rare_start_pos_set[m1+1]:
+                                            rare_start_pos_set = rare_start_pos_set[:(m1+1)]
+                                            rare_end_pos_set = rare_end_pos_set[:(m1+1)]
+                                            rare_start_pos_set.append(start_pos)
+                                            rare_end_pos_set.append(end_pos)
                                             break
                     else:
-                        lowf_start_pos_set.append(start_pos)
-                        lowf_end_pos_set.append(end_pos)
+                        rare_start_pos_set.append(start_pos)
+                        rare_end_pos_set.append(end_pos)
 
     # get the non-IBD regions based on low frquency variants
-    lowf_start_pos_set_non = []
-    lowf_end_pos_set_non = []
+    rare_start_pos_set_non = []
+    rare_end_pos_set_non = []
     index_store_set_non = []
     if include_clean == 1:
-        index_set = df_window_score.index[df_window_score.loc[:,'lowf_score']<0]
+        index_set = df_window_score.index[df_window_score.loc[:,'rare_score']<0]
         if len(index_set) != 0:
             for i in range(len(index_set)):
                 index = list(index_set)[i]
@@ -1623,7 +1614,7 @@ def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,ra
                         region_start_cm_pos = common_map.iloc[windows_set[index_left][0],2]
                         region_end_cm_pos = common_map.iloc[windows_set[index_right][-1],2]
                         region_length = region_end_cm_pos-region_start_cm_pos
-                        if region_length <= 1 and df_window_score.loc[index_left,'common_score']>-1 and df_window_score.loc[index_right,'common_score']>-1: # we only care about low frequency variants that stay in the regions of common scores larger than -1 (IBS regions)
+                        if region_length <= 1 and df_window_score.loc[index_left,'common_score']>-1 and df_window_score.loc[index_right,'common_score']>-1: # we only care about rare variants that stay in the regions of common scores larger than -1 (IBS regions)
                             if index_left > 0 and index_right < len(df_window_score.index)-1:
                                 index_left = index_left-1
                                 index_right = index_right+1
@@ -1711,7 +1702,7 @@ def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,ra
                         elif len(index_inter1) == 0 and len(index_inter2) > 0:
                             tmp_pos_set = []
                             for j in range(len(index_inter2)):
-                                if np.abs(rare_map.loc[index_inter2[j],3]-next_common_start_pos) > np.abs(rare_map.loc[index_inter2[j],3]-common_end_pos): # here it's not '>=' but just '>', because for consistency, we put rare_SNPs that are in the case of '=' to windows that they have the rare SNPs before them but not behind them
+                                if np.abs(rare_map.loc[index_inter2[j],3]-next_common_start_pos) > np.abs(rare_map.loc[index_inter2[j],3]-common_end_pos): # here it's not '>=' but just '>', because for consistency, we put rare_SNPs that are in the case of '=' to windows that they have the rare variants before them but not behind them
                                     tmp_pos_set.append(rare_map.loc[index_inter2[j],3])
                             if len(tmp_pos_set) == 0:
                                 end_pos = common_end_pos
@@ -1735,25 +1726,25 @@ def generate_IBD_region(df_block_score,df_window_score,windows_set,common_map,ra
                                 end_pos = common_end_pos
                             else:
                                 end_pos = max(tmp_pos_set_2) # get the maximum in the tmp_pos_set, note that here is not minimum
-                        lowf_start_pos_set_non.append(start_pos)
-                        lowf_end_pos_set_non.append(end_pos)
+                        rare_start_pos_set_non.append(start_pos)
+                        rare_end_pos_set_non.append(end_pos)
 
-    if len(lowf_start_pos_set) > 0:
+    if len(rare_start_pos_set) > 0:
         if len(start_pos_set) > 0:
-            start_pos_set,end_pos_set = combine_pos_set(start_pos_set,end_pos_set,lowf_start_pos_set,lowf_end_pos_set)
+            start_pos_set,end_pos_set = combine_pos_set(start_pos_set,end_pos_set,rare_start_pos_set,rare_end_pos_set)
         else:
-            start_pos_set = lowf_start_pos_set
-            end_pos_set = lowf_end_pos_set
+            start_pos_set = rare_start_pos_set
+            end_pos_set = rare_end_pos_set
             check_IBD = 1
     
-    if len(lowf_start_pos_set_non) > 0 and len(start_pos_set) > 0:
-        start_pos_set,end_pos_set = remove_pos_set(start_pos_set,end_pos_set,lowf_start_pos_set_non,lowf_end_pos_set_non)
+    if len(rare_start_pos_set_non) > 0 and len(start_pos_set) > 0:
+        start_pos_set,end_pos_set = remove_pos_set(start_pos_set,end_pos_set,rare_start_pos_set_non,rare_end_pos_set_non)
         if len(start_pos_set) == 0:
             check_IBD = 0
 
     indi_1 = df_block_score.iloc[0,0]
     indi_2 = df_block_score.iloc[0,1]
-    list1 = [start_pos_set,end_pos_set,indi_1,indi_2,check_IBD,lowf_start_pos_set_non,lowf_end_pos_set_non]
+    list1 = [start_pos_set,end_pos_set,indi_1,indi_2,check_IBD,rare_start_pos_set_non,rare_end_pos_set_non]
     return list1
 
 
