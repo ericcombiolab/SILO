@@ -8,10 +8,10 @@ import argparse
 import sys
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-w","--winsize",type=int,default=10,help="the window size")
-parser.add_argument("-l","--length",type=float,default=3,help="the length of block")
+parser.add_argument("-w","--winsize",type=int,default=14,help="the window size")
+parser.add_argument("-l","--length",type=float,default=4,help="the length of block")
 parser.add_argument("-ec","--error_common",type=float,default=0.005,help="the genotype error of common variants")
-parser.add_argument("-el","--error_rare",type=float,default=1e-5,help="the genotype error of rare variants")
+parser.add_argument("-el","--error_rare",type=float,default=1e-3,help="the genotype error of rare variants")
 parser.add_argument("-t","--threshold",type=float,default=3,help="the threshold for LLR score")
 parser.add_argument("--mode",type=str,help="Input 'inner' or 'outer', which stands for computing inner log-likelihood ratio or computing outer log-likelihood ratio, respectively",default='outer')
 parser.add_argument("--union",type=int,help="calculate scores for rare variants of a pair of individuals that 1. either one carries minor alleles or 2. both two individuals carry minor alleles. Input 1 for case 1, or 2 for case 2",default=2)
