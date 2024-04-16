@@ -13,7 +13,7 @@ optional arguments:
   -w, --winsize: the number of common variants in a window. The default value is 14.  
   -l, --length: the length (centimorgan) of a block. The default value is 4.  
   -ec, --error_common: the genotype error of common variants. The default value is 0.005.  
-  -el, --error_rare: the genotype error of rare variants. The default value is 1e-3.  
+  -er, --error_rare: the genotype error of rare variants. The default value is 1e-3.  
   -t, --threshold: the threshold for LLR score. The default value is 3.  
   --mode: input 'inner' or 'outer', which stands for computing inner log-likelihood ratio or computing outer log-likelihood ratio,  
   respectively. The default value is 'outer'.  
