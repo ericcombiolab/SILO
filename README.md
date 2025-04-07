@@ -35,7 +35,7 @@ optional arguments:
   --negative_thres: the threshold of window common scores for negative count and negative ratio. The default value is -0.3.
   
 required arguments
-  --train_common: the path and filename (prefix) of common variants of the training set (i.e. population set).  
+  --train_common: the path and filename (prefix) of common variants of the training set (i.e. reference population).  
   --train_rare: the path and filename (prefix) of rare variants of the training set.  
   --test_common: the path and filename (prefix) of common variants of the test set.  
   --test_rare: the path and filename (prefix) of rare variants of the test set.  
@@ -62,6 +62,7 @@ python3 run_SILO.py \
 
 ## File format
 ### Input
+SILO is designed for WGS SNPs. The training set (i.e. reference population) need to be phased, while the testing set can be unphased.
 Common variants of the training set: .hap, .map, .frq  
 Common variants of the testing set: .tped, .tfam  
 Rare variants of the training set: .map, .frq, .frq.counts  
