@@ -62,7 +62,7 @@ python3 run_SILO.py \
 
 ## File format
 ### Input
-SILO is designed for WGS SNPs. The training set (i.e. reference population) need to be phased, while the testing set can be unphased.
+SILO is designed for WGS SNPs. The training set (i.e. reference population) need to be phased, while the testing set can be unphased.  
 Common variants of the training set: .hap, .map, .frq  
 Common variants of the testing set: .tped, .tfam  
 Rare variants of the training set: .map, .frq, .frq.counts  
